@@ -1,0 +1,431 @@
+const Finance = require("../models/Finance");
+
+const roundToTwo = (value) => Number(value.toFixed(2));
+
+const getGoalAmount = (goal) => {
+  if (typeof goal === "number") {
+    return goal;
+  }
+
+  return Number(goal?.amount || 0);
+};
+
+const getGoalTimeInMonths = (goal) => {
+  if (typeof goal === "number") {
+    return 1;
+  }
+
+  return Number(goal?.timeInMonths || 1);
+};
+
+const getFinanceGoals = (finance) => {
+  if (finance.goals?.length) {
+    return finance.goals;
+  }
+
+  return finance.goal ? [finance.goal] : [];
+};
+
+const getGoalSummary = (goals) =>
+  goals.reduce(
+    (summary, goal) => {
+      const amount = getGoalAmount(goal);
+      const timeInMonths = getGoalTimeInMonths(goal);
+
+      summary.totalAmount += amount;
+      summary.monthlyTarget += amount / timeInMonths;
+      summary.longestTimeInMonths = Math.max(
+        summary.longestTimeInMonths,
+        timeInMonths
+      );
+
+      return summary;
+    },
+    {
+      totalAmount: 0,
+      monthlyTarget: 0,
+      longestTimeInMonths: 0,
+    }
+  );
+
+const validateGoalInput = (goal) => {
+  const { name, amount, timeInMonths } = goal || {};
+  const goalAmount = Number(amount);
+  const goalTimeInMonths = Number(timeInMonths);
+
+  if (
+    !name ||
+    Number.isNaN(goalAmount) ||
+    Number.isNaN(goalTimeInMonths)
+  ) {
+    return {
+      error: "Goal name, goal amount, and goal time are required",
+    };
+  }
+
+  if (goalAmount < 0 || goalTimeInMonths < 1) {
+    return {
+      error: "Goal amount cannot be negative. Goal time must be at least 1 month",
+    };
+  }
+
+  return {
+    goal: {
+      name,
+      amount: goalAmount,
+      timeInMonths: goalTimeInMonths,
+    },
+  };
+};
+
+const getFinanceStatus = (expenseRate, savingsRate) => {
+  if (expenseRate > 80) {
+    return "High spending";
+  }
+
+  if (savingsRate >= 30) {
+    return "Excellent saving";
+  }
+
+  if (savingsRate >= 20) {
+    return "Good saving";
+  }
+
+  if (savingsRate >= 10) {
+    return "Average saving";
+  }
+
+  return "Needs improvement";
+};
+
+const getRecommendation = (expenseRate, savingsRate, goalAchievementRate) => {
+  if (expenseRate > 80) {
+    return "Your expenses are taking most of your salary. Try reducing non-essential spending first.";
+  }
+
+  if (goalAchievementRate < 50) {
+    return "You are far from your goal. Increase savings or lower expenses to improve goal progress.";
+  }
+
+  if (savingsRate >= 30) {
+    return "You are saving well. Keep this pattern and consider investing the surplus wisely.";
+  }
+
+  if (savingsRate >= 20) {
+    return "Your savings are healthy. Review expenses regularly to stay on track.";
+  }
+
+  return "Try to save at least 20% of your salary to build stronger financial stability.";
+};
+
+const createFinance = async (req, res) => {
+  try {
+    const { salary, expense, goal } = req.body;
+
+    const existingFinance = await Finance.findOne({ user: req.user._id });
+
+    if (existingFinance) {
+      return res.status(409).json({
+        message: "Finance details already exist for this user",
+      });
+    }
+
+    if (salary === undefined || expense === undefined || goal === undefined) {
+      return res.status(400).json({
+        message: "Salary, expense, and goal are required",
+      });
+    }
+
+    const validatedGoal = validateGoalInput(goal);
+    const salaryAmount = Number(salary);
+    const expenseAmount = Number(expense);
+
+    if (
+      Number.isNaN(salaryAmount) ||
+      Number.isNaN(expenseAmount) ||
+      validatedGoal.error
+    ) {
+      return res.status(400).json({
+        message:
+          validatedGoal.error ||
+          "Salary, expense, goal name, goal amount, and goal time are required",
+      });
+    }
+
+    if (
+      salaryAmount < 0 ||
+      expenseAmount < 0
+    ) {
+      return res.status(400).json({
+        message: "Salary and expense cannot be negative",
+      });
+    }
+
+    const goals = [validatedGoal.goal];
+    const goalSummary = getGoalSummary(goals);
+    const remainingAmount = salaryAmount - expenseAmount;
+    const goalProgress =
+      goalSummary.totalAmount === 0
+        ? 100
+        : Math.min((remainingAmount / goalSummary.totalAmount) * 100, 100);
+
+    const finance = await Finance.create({
+      user: req.user._id,
+      salary: salaryAmount,
+      expense: expenseAmount,
+      goal: validatedGoal.goal,
+      goals,
+    });
+
+    return res.status(201).json({
+      message: "Finance details saved successfully",
+      finance: {
+        id: finance._id,
+        user: finance.user,
+        salary: finance.salary,
+        expense: finance.expense,
+        goal: finance.goal,
+        goals: finance.goals,
+        goalCount: finance.goals.length,
+        totalGoalAmount: roundToTwo(goalSummary.totalAmount),
+        longestGoalTimeInMonths: goalSummary.longestTimeInMonths,
+        remainingAmount,
+        monthlyGoalAmount: roundToTwo(goalSummary.monthlyTarget),
+        canAchieveMonthlyGoal: remainingAmount >= goalSummary.monthlyTarget,
+        goalProgress: Number(goalProgress.toFixed(2)),
+        isGoalAchieved: remainingAmount >= goalSummary.totalAmount,
+      },
+    });
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.status(409).json({
+        message: "Finance details already exist for this user",
+      });
+    }
+
+    return res.status(500).json({
+      message: "Failed to save finance details",
+      error: error.message,
+    });
+  }
+};
+
+const addFinanceGoal = async (req, res) => {
+  try {
+    const finance = await Finance.findOne({ user: req.user._id });
+
+    if (!finance) {
+      return res.status(404).json({
+        message: "Finance details not found. Add finance details first",
+      });
+    }
+
+    const goals = getFinanceGoals(finance);
+
+    if (goals.length >= 3) {
+      return res.status(409).json({
+        message: "You can add only 3 goals",
+      });
+    }
+
+    const validatedGoal = validateGoalInput(req.body.goal);
+
+    if (validatedGoal.error) {
+      return res.status(400).json({
+        message: validatedGoal.error,
+      });
+    }
+
+    finance.goals = [...goals, validatedGoal.goal];
+    await finance.save();
+
+    return res.status(201).json({
+      message: "Goal added successfully",
+      goals: finance.goals,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      message: "Failed to add goal",
+      error: error.message,
+    });
+  }
+};
+
+const updateFinanceAmounts = async (req, res) => {
+  try {
+    const { salary, expense } = req.body;
+    const salaryAmount = Number(salary);
+    const expenseAmount = Number(expense);
+
+    if (
+      salary === undefined ||
+      expense === undefined ||
+      Number.isNaN(salaryAmount) ||
+      Number.isNaN(expenseAmount)
+    ) {
+      return res.status(400).json({
+        message: "Salary and expense are required",
+      });
+    }
+
+    if (salaryAmount < 0 || expenseAmount < 0) {
+      return res.status(400).json({
+        message: "Salary and expense cannot be negative",
+      });
+    }
+
+    const finance = await Finance.findOneAndUpdate(
+      { user: req.user._id },
+      {
+        salary: salaryAmount,
+        expense: expenseAmount,
+      },
+      {
+        new: true,
+        runValidators: true,
+      }
+    );
+
+    if (!finance) {
+      return res.status(404).json({
+        message: "Finance details not found. Add finance details first",
+      });
+    }
+
+    return res.json({
+      message: "Salary and expense updated successfully",
+      finance,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      message: "Failed to update salary and expense",
+      error: error.message,
+    });
+  }
+};
+
+const getFinanceDashboard = async (req, res) => {
+  try {
+    const financeData = await Finance.find({ user: req.user._id }).sort({
+      createdAt: -1,
+    });
+
+    if (financeData.length === 0) {
+      return res.json({
+        message: "No finance data found",
+        summary: {
+          totalEntries: 0,
+          totalSalary: 0,
+          totalExpense: 0,
+          totalGoal: 0,
+          totalRemaining: 0,
+          averageSalary: 0,
+          averageExpense: 0,
+          averageGoal: 0,
+          savingsRate: 0,
+          expenseRate: 0,
+          goalAchievementRate: 0,
+          status: "No data",
+          recommendation: "Add salary, expense, and goal data to see your dashboard analysis.",
+        },
+        entries: [],
+      });
+    }
+
+    const totals = financeData.reduce(
+      (acc, item) => {
+        const goals = getFinanceGoals(item);
+        const goalAmount = goals.reduce(
+          (sum, currentGoal) => sum + getGoalAmount(currentGoal),
+          0
+        );
+
+        acc.salary += item.salary;
+        acc.expense += item.expense;
+        acc.goal += goalAmount;
+        acc.remaining += item.salary - item.expense;
+        return acc;
+      },
+      {
+        salary: 0,
+        expense: 0,
+        goal: 0,
+        remaining: 0,
+      }
+    );
+
+    const totalEntries = financeData.length;
+    const savingsRate =
+      totals.salary === 0 ? 0 : (totals.remaining / totals.salary) * 100;
+    const expenseRate =
+      totals.salary === 0 ? 0 : (totals.expense / totals.salary) * 100;
+    const goalAchievementRate =
+      totals.goal === 0 ? 100 : Math.min((totals.remaining / totals.goal) * 100, 100);
+
+    const status = getFinanceStatus(expenseRate, savingsRate);
+    const recommendation = getRecommendation(
+      expenseRate,
+      savingsRate,
+      goalAchievementRate
+    );
+
+    const entries = financeData.map((item) => {
+      const remainingAmount = item.salary - item.expense;
+      const goals = getFinanceGoals(item);
+      const goalSummary = getGoalSummary(goals);
+      const goalProgress =
+        goalSummary.totalAmount === 0
+          ? 100
+          : Math.min((remainingAmount / goalSummary.totalAmount) * 100, 100);
+
+      return {
+        id: item._id,
+        salary: item.salary,
+        expense: item.expense,
+        goal: item.goal,
+        goals,
+        goalCount: goals.length,
+        totalGoalAmount: roundToTwo(goalSummary.totalAmount),
+        longestGoalTimeInMonths: goalSummary.longestTimeInMonths,
+        remainingAmount,
+        monthlyGoalAmount: roundToTwo(goalSummary.monthlyTarget),
+        canAchieveMonthlyGoal: remainingAmount >= goalSummary.monthlyTarget,
+        goalProgress: roundToTwo(goalProgress),
+        isGoalAchieved: remainingAmount >= goalSummary.totalAmount,
+        createdAt: item.createdAt,
+      };
+    });
+
+    return res.json({
+      message: "Finance dashboard data fetched successfully",
+      summary: {
+        totalEntries,
+        totalSalary: totals.salary,
+        totalExpense: totals.expense,
+        totalGoal: totals.goal,
+        totalRemaining: totals.remaining,
+        averageSalary: roundToTwo(totals.salary / totalEntries),
+        averageExpense: roundToTwo(totals.expense / totalEntries),
+        averageGoal: roundToTwo(totals.goal / totalEntries),
+        savingsRate: roundToTwo(savingsRate),
+        expenseRate: roundToTwo(expenseRate),
+        goalAchievementRate: roundToTwo(goalAchievementRate),
+        status,
+        recommendation,
+      },
+      entries,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      message: "Failed to fetch finance dashboard data",
+      error: error.message,
+    });
+  }
+};
+
+module.exports = {
+  addFinanceGoal,
+  createFinance,
+  getFinanceDashboard,
+  updateFinanceAmounts,
+};
