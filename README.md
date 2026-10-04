@@ -112,3 +112,7 @@ npm run dev
 <img src="https://capsule-render.vercel.app/api?type=waving&color=0:052e16,50:16a34a,100:4ade80&height=120&section=footer"/>
 
 </div>
+
+
+
+ gitand github
